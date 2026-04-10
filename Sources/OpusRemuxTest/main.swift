@@ -138,8 +138,11 @@ func main() {
         ffmpeg.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         ffmpeg.arguments = [
             "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+            "-ac", "2",
             "-c:a", "libopus", "-b:a", "160k",
+            "-vbr", "on",
+            "-frame_duration", "20",
             "-f", "webm",
             testPath
         ]
