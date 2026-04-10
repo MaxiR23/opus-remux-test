@@ -2,5 +2,7 @@
 .swiftpm/
 Package.resolved
 *.xcodeproj
+!SimulatorTest/SimulatorTest.xcodeproj/
+!SimulatorTest/SimulatorTest.xcodeproj/project.pbxproj
 xcuserdata/
 DerivedData/
