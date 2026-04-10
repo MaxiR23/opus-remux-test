@@ -90,6 +90,42 @@ class ResourceLoaderTests: XCTestCase {
         _ = loader
     }
 
+    // MARK: - HTTPS direct stream test (REAL STREAM)
+
+    func testDirectHTTPSStream() {
+        let url = URL(string: "https://rr5---sn-najern7r.googlevideo.com/videoplayback?expire=1775840117&ei=FdfYadT8DvKflu8PxaWBsQo&ip=34.106.173.182&id=o-AB5XaV42_y6WPY_VmqvOkbTB9ZmCQIJljyI7mRFkoNKn&itag=251&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=1189&met=1775818517%2C&mh=7c&mm=31%2C26&mn=sn-najern7r%2Csn-a5m7lnld&ms=au%2Conr&mv=m&mvi=5&pl=20&rms=au%2Cau&initcwndbps=13758750&bui=AUUZDGJGujZyN341OsVVSn20fnGieF243WoMBVEX1hAAHyOR5NnqUqiZ9unocj9ZVgbcC3ZrTd0CntRK&spc=jlWave0ASHDZJum_usyPV1W_e1EGNd6qFT6pb30Qots74Td4jg&vprv=1&svpuc=1&mime=audio%2Fwebm&rqh=1&gir=yes&clen=3433755&dur=213.061&lmt=1766955883819090&mt=1775818166&fvip=2&keepalive=yes&fexp=51565116%2C51565682&c=ANDROID_VR&txp=5532534&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=AHEqNM4wRgIhALvKivQ34xWbvkxoR6UmIPJ6gjX4KMXFzuqEgrYX4m4kAiEAlKPUedwxb13I6xsG4mBclXfiwCG57Y0Q9KVfY7-X1F0%3D&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRAIgAfrxHoj4qOUb1l3f-yGvd69zur62MShDhYqVT08mX8YCIB0iksTJO_94PopSGzF9AJLJdr9P8sihBo91hkVTgvCN")!
+
+        let asset = AVURLAsset(url: url)
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
+
+        let exp = expectation(description: "https-direct")
+
+        let obs = item.observe(\.status, options: [.new]) { item, _ in
+            switch item.status {
+            case .readyToPlay:
+                let dur = CMTimeGetSeconds(item.duration)
+                print("[HTTPS] ready duration=\(dur)")
+                exp.fulfill()
+
+            case .failed:
+                print("[HTTPS] FAILED:", item.error?.localizedDescription ?? "?")
+                XCTFail("https failed")
+                exp.fulfill()
+
+            case .unknown:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        player.play()
+        wait(for: [exp], timeout: 20)
+
+        obs.invalidate()
+    }
+
     // MARK: - Build CAF test data
 
     private func buildCAF() -> Data? {
@@ -182,21 +218,17 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         feedTimer = t
     }
 
-    // MARK: - Delegate (FIX CLAVE AQUÍ)
-
     func resourceLoader(
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest
     ) -> Bool {
 
-        // ←←← Rellenamos el header SÍNCRONAMENTE (antes de que loadValuesAsynchronously termine)
         if let info = request.contentInformationRequest {
             info.contentType                = AVFileType.caf.rawValue
             info.contentLength              = Int64(cafData.count)
             info.isByteRangeAccessSupported = true
         }
 
-        // Ahora sí mandamos el resto al queue (dataRequest + proceso)
         queue.async { [weak self] in
             guard let self else { return }
             self.pendingRequests.append(request)
@@ -218,7 +250,6 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         var finished: [AVAssetResourceLoadingRequest] = []
 
         for request in pendingRequests {
-            // content info ya se rellenó arriba, solo procesamos dataRequest
             guard let dr = request.dataRequest else {
                 request.finishLoading()
                 finished.append(request)
