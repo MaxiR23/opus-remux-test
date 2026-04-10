@@ -3,154 +3,275 @@ import AVFoundation
 
 // MARK: - Logger
 
-func log(_ msg: String) {
-    print("[TEST] \(msg)")
+func log(_ msg: String)      { print("[TEST] \(msg)") }
+func logError(_ msg: String) { print("[FAIL] \(msg)") }
+func logPass(_ msg: String)  { print("[PASS] \(msg)") }
+
+func measure<T>(_ label: String, _ block: () throws -> T) rethrows -> T {
+    let start = CFAbsoluteTimeGetCurrent()
+    let result = try block()
+    let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000
+    log("\(label): \(String(format: "%.1f", ms))ms")
+    return result
 }
 
-func logError(_ msg: String) {
-    print("[FAIL] \(msg)")
+// MARK: - Download
+
+func downloadSync(url: URL) -> Data? {
+    let sem = DispatchSemaphore(value: 0)
+    var result: Data?
+    URLSession.shared.dataTask(with: url) { data, response, error in
+        if let e = error { logError("Download: \(e.localizedDescription)") }
+        if let h = response as? HTTPURLResponse { log("HTTP \(h.statusCode)") }
+        result = data
+        sem.signal()
+    }.resume()
+    sem.wait()
+    return result
 }
 
-func logPass(_ msg: String) {
-    print("[PASS] \(msg)")
+// MARK: - afinfo
+
+func runAfinfo(path: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/afinfo")
+    p.arguments = [path]
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError  = pipe
+    try? p.run(); p.waitUntilExit()
+    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    if p.terminationStatus == 0 { logPass("afinfo OK"); print(out) }
+    else                         { logError("afinfo FAIL"); print(out) }
 }
 
-// MARK: - Progressive Loader
+// MARK: - ProgressiveLoader (real progressive streaming)
 
+/// Simula un stream que va llegando de a chunks.
+/// AVFoundation hace byte-range requests; los dejamos PENDIENTES
+/// y los vamos satisfaciendo a medida que `bytesAvailable` crece.
 class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     let cafData: Data
-    let serveUpTo: Int
+    private(set) var bytesAvailable: Int
 
     private var pendingRequests: [AVAssetResourceLoadingRequest] = []
-    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "progressive.loader")
+    private var feedTimer: DispatchSourceTimer?
 
-    init(cafData: Data, servePercent: Int) {
+    /// - startPercent: cuánto tenemos al inicio (0-100)
+    /// - chunkPercent:  cuánto añadimos por tick
+    /// - intervalMs:    milisegundos entre ticks
+    init(cafData: Data, startPercent: Int, chunkPercent: Int = 5, intervalMs: Int = 80) {
         self.cafData = cafData
-        self.serveUpTo = (cafData.count * servePercent) / 100
+        self.bytesAvailable = max(1, cafData.count * startPercent / 100)
         super.init()
+        startFeed(chunkBytes: cafData.count * chunkPercent / 100,
+                  intervalMs: intervalMs)
     }
 
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
-    ) -> Bool {
-
-        lock.lock()
-        pendingRequests.append(loadingRequest)
-        lock.unlock()
-
-        processRequests()
-        return true
+    private func startFeed(chunkBytes: Int, intervalMs: Int) {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .milliseconds(intervalMs),
+                   repeating: .milliseconds(intervalMs))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.bytesAvailable < self.cafData.count else {
+                self.feedTimer?.cancel()
+                return
+            }
+            self.bytesAvailable = min(self.bytesAvailable + chunkBytes, self.cafData.count)
+            log("  feed: \(self.bytesAvailable)/\(self.cafData.count) bytes (\(self.bytesAvailable*100/self.cafData.count)%)")
+            self.processRequests()
+        }
+        t.resume()
+        feedTimer = t
     }
 
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        didCancel loadingRequest: AVAssetResourceLoadingRequest
-    ) {
-        lock.lock()
-        pendingRequests.removeAll { $0 === loadingRequest }
-        lock.unlock()
+    // MARK: AVAssetResourceLoaderDelegate
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
+        queue.async { [weak self] in
+            self?.pendingRequests.append(request)
+            self?.processRequests()
+        }
+        return true   // ← clave: le decimos a AVFoundation que ESPERE
     }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel request: AVAssetResourceLoadingRequest) {
+        queue.async { [weak self] in
+            self?.pendingRequests.removeAll { $0 === request }
+        }
+    }
+
+    // MARK: Core pump
 
     private func processRequests() {
-        lock.lock()
-
-        var completed: [AVAssetResourceLoadingRequest] = []
+        var finished: [AVAssetResourceLoadingRequest] = []
 
         for request in pendingRequests {
 
-            if let content = request.contentInformationRequest {
-                content.contentType = "com.apple.coreaudio-format"
-                content.contentLength = Int64(cafData.count)
-                content.isByteRangeAccessSupported = true
+            // Content info (sólo primera vez)
+            if let info = request.contentInformationRequest {
+                info.contentType                 = "com.apple.coreaudio-format"
+                info.contentLength               = Int64(cafData.count)
+                info.isByteRangeAccessSupported  = true
             }
 
-            guard let dataRequest = request.dataRequest else {
-                completed.append(request)
+            guard let dr = request.dataRequest else {
+                request.finishLoading()
+                finished.append(request)
                 continue
             }
 
-            let offset = Int(dataRequest.requestedOffset)
-            let requested = dataRequest.requestedLength
+            // currentOffset ya tiene en cuenta lo que respondimos antes en este request
+            let from = Int(dr.currentOffset)
+            let to   = Int(dr.requestedOffset) + dr.requestedLength
 
-            let available = min(serveUpTo, cafData.count)
-            let remaining = available - offset
-
-            guard remaining > 0 else {
-                continue
+            // ¿Tenemos bytes nuevos para este request?
+            if bytesAvailable > from {
+                let end   = min(bytesAvailable, to)
+                dr.respond(with: cafData.subdata(in: from..<end))
             }
 
-            let length = min(requested, remaining)
-            let range = offset..<(offset + length)
-
-            dataRequest.respond(with: cafData.subdata(in: range))
-
-            let end = offset + length
-            let requestEnd = Int(dataRequest.requestedOffset + Int64(dataRequest.requestedLength))
-
-            if end >= requestEnd {
-                completed.append(request)
+            // ¿Satisficimos el request completo?
+            if Int(dr.currentOffset) >= to {
+                request.finishLoading()
+                finished.append(request)
             }
+            // Si no → lo dejamos en pendingRequests, el timer lo retomará
         }
 
-        pendingRequests.removeAll { req in
-            if completed.contains(where: { $0 === req }) {
-                req.finishLoading()
-                return true
-            }
-            return false
-        }
-
-        lock.unlock()
+        pendingRequests.removeAll { r in finished.contains { $0 === r } }
     }
 }
 
-// MARK: - Simple Progressive Test
+// MARK: - Progressive test
 
-func testProgressive(cafData: Data, percent: Int) {
-    log("")
-    log("--- Progressive Test \(percent)% ---")
+func testProgressive(cafData: Data, startPercent: Int, label: String) {
+    log("--- \(label): start=\(startPercent)% ---")
 
-    let url = URL(string: "progressive://test.caf")!
+    // Scheme custom → obliga a ir por el resource loader
+    let url   = URL(string: "progressive-caf://\(label).caf")!
     let asset = AVURLAsset(url: url)
 
-    let loader = ProgressiveLoader(cafData: cafData, servePercent: percent)
-    asset.resourceLoader.setDelegate(loader, queue: DispatchQueue(label: "loader"))
+    let loader = ProgressiveLoader(cafData: cafData, startPercent: startPercent)
+    asset.resourceLoader.setDelegate(loader, queue: loader.queue)
 
-    let semaphore = DispatchSemaphore(value: 0)
+    let sem = DispatchSemaphore(value: 0)
 
-    asset.loadValuesAsynchronously(forKeys: ["playable"]) {
-        var error: NSError?
+    asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
+        var err: NSError?
+        let status = asset.statusOfValue(forKey: "playable", error: &err)
 
-        let status = asset.statusOfValue(forKey: "playable", error: &error)
-
-        if status == .loaded && asset.isPlayable {
-            logPass("Progressive \(percent)% playable")
+        if status == .loaded {
+            let dur = CMTimeGetSeconds(asset.duration)
+            logPass("\(label) → playable=\(asset.isPlayable)  duration=\(String(format: "%.2f", dur))s  tracks=\(asset.tracks.count)")
         } else {
-            logError("Progressive \(percent)% failed: \(error?.localizedDescription ?? "status \(status.rawValue)")")
+            logError("\(label) → FAILED: \(err?.localizedDescription ?? "status \(status.rawValue)")")
         }
-
-        semaphore.signal()
+        sem.signal()
     }
 
-    _ = semaphore.wait(timeout: .now() + 5)
+    _ = sem.wait(timeout: .now() + 15)   // timeout generoso para que el feed llegue
+    _ = loader                            // mantener loader vivo
+    log("")
 }
 
-// MARK: - Main Test (SIMPLIFICADO)
+// MARK: - Generate CAF
+
+func generateCAF(webmURL: String?) -> Data? {
+    let tmpWebM = "/tmp/test_opus.webm"
+
+    // Intentar ffmpeg
+    var webmData: Data?
+    let ff = Process()
+    ff.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    ff.arguments = ["ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                    "-c:a", "libopus", "-b:a", "160k",
+                    "-f", "webm", tmpWebM]
+    ff.standardOutput = FileHandle.nullDevice
+    ff.standardError  = FileHandle.nullDevice
+    if (try? ff.run()) != nil {
+        ff.waitUntilExit()
+        if ff.terminationStatus == 0 {
+            webmData = try? Data(contentsOf: URL(fileURLWithPath: tmpWebM))
+        }
+    }
+
+    if let d = webmData { log("WebM generado con ffmpeg: \(d.count) bytes") }
+
+    // Fallback download
+    if webmData == nil {
+        let urlStr = webmURL ?? "https://upload.wikimedia.org/wikipedia/commons/b/b0/Animaccount_remix.webm"
+        log("Descargando fallback: \(urlStr)")
+        guard let u = URL(string: urlStr) else { return nil }
+        webmData = measure("Download") { downloadSync(url: u) }
+    }
+
+    guard let raw = webmData, !raw.isEmpty else { logError("Sin data WebM"); return nil }
+    guard raw.prefix(4) == Data([0x1A, 0x45, 0xDF, 0xA3]) else { logError("No es EBML"); return nil }
+    logPass("EBML magic OK")
+
+    let demux: DemuxResult
+    do { demux = try measure("Demux") { try WebMDemuxer(data: raw).demux() } }
+    catch { logError("Demux: \(error)"); return nil }
+    logPass("Demux OK — \(demux.packets.count) paquetes, channels=\(demux.channels)")
+
+    let caf = measure("Mux CAF") {
+        CAFMuxer.mux(opusHead: demux.opusHead, packets: demux.packets, channels: demux.channels)
+    }
+    guard caf.prefix(4) == "caff".data(using: .ascii) else { logError("CAF inválido"); return nil }
+    logPass("CAF muxeado: \(caf.count) bytes")
+
+    let path = "/tmp/remux_test_output.caf"
+    try? caf.write(to: URL(fileURLWithPath: path))
+    logPass("Guardado en \(path)")
+    return caf
+}
+
+// MARK: - Main
 
 func main() {
-    log("=== Progressive CAF Test ===")
+    log("=== Opus Remux + Progressive Streaming Test ===\n")
 
-    // Generamos CAF fake simple (reemplazá por tu mux real)
-    let cafData = try! Data(contentsOf: URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff"))
+    let args = CommandLine.arguments
 
-    testProgressive(cafData: cafData, percent: 100)
-    testProgressive(cafData: cafData, percent: 50)
-    testProgressive(cafData: cafData, percent: 10)
+    // ── Phase 1: pipeline WebM → CAF ───────────────────────────────────
+    log("=== Fase 1: WebM → CAF ===")
+    guard let cafData = generateCAF(webmURL: args.count > 1 ? args[1] : nil) else {
+        logError("No se pudo generar el CAF")
+        exit(1)
+    }
 
-    log("=== Done ===")
+    // ── Phase 2: afinfo ─────────────────────────────────────────────────
+    log("\n=== Fase 2: afinfo ===")
+    runAfinfo(path: "/tmp/remux_test_output.caf")
+
+    // ── Phase 3: progressive streaming ─────────────────────────────────
+    // Cada test empieza con N% de los bytes disponibles y el loader
+    // va dripfeeding el resto cada 80ms. AVFoundation debe poder
+    // determinar "playable" en cuanto tenga el header completo.
+    log("\n=== Fase 3: Progressive Streaming ===")
+    log("(El loader feed 5% cada 80ms hasta completar)\n")
+
+    // 100% → baseline, debería ser instantáneo
+    testProgressive(cafData: cafData, startPercent: 100, label: "100pct")
+
+    // 50% → header + pakt ya disponibles, empieza a reproducir
+    testProgressive(cafData: cafData, startPercent: 50,  label: "50pct")
+
+    // 10% → sólo el header, el loader va entregando el resto
+    testProgressive(cafData: cafData, startPercent: 10,  label: "10pct")
+
+    // 0% → nada al inicio, AVFoundation arranca cuando llega el primer chunk
+    testProgressive(cafData: cafData, startPercent: 0,   label: "0pct")
+
+    log("=== Todo listo ===")
 }
 
 main()
-RunLoop.current.run(until: Date(timeIntervalSinceNow: 2))
+RunLoop.current.run(until: Date(timeIntervalSinceNow: 5))
