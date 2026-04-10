@@ -1,0 +1,45 @@
+name: Test Opus Remux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      webm_url:
+        description: "WebM/Opus URL to test (leave empty for generated sine wave)"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    name: Build & Run
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run test
+        run: |
+          if [ -n "${{ inputs.webm_url }}" ]; then
+            swift run -c release OpusRemuxTest "${{ inputs.webm_url }}"
+          else
+            swift run -c release OpusRemuxTest
+          fi
+
+      - name: Upload CAF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remux-output
+          path: /tmp/remux_test_output.caf
+          if-no-files-found: ignore
