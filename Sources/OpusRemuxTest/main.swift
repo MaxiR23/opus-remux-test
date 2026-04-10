@@ -143,7 +143,7 @@ func main() {
     log("=== Progressive CAF Test ===")
 
     // Generamos CAF fake simple (reemplazá por tu mux real)
-    let cafData = Data(repeating: 0xAA, count: 100_000)
+    let cafData = try! Data(contentsOf: URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff"))
 
     testProgressive(cafData: cafData, percent: 100)
     testProgressive(cafData: cafData, percent: 50)
