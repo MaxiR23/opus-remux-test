@@ -286,8 +286,162 @@ func runTest(with webmData: Data) {
     log("  Ratio:       \(String(format: "%.2f", ratio))x")
 
     log("")
+    log("--- Step 7: Progressive AVAssetResourceLoaderDelegate ---")
+    testProgressivePlayback(cafData: cafData)
+
+    log("")
     log("=== Test complete ===")
 }
 
+// MARK: - Progressive ResourceLoader test
+
+class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
+    let cafData: Data
+    let serveUpTo: Int // only serve this many bytes initially
+    var requestCount = 0
+    var bytesServed = 0
+    var firstDataRequestSize = 0
+    var contentInfoRequested = false
+
+    init(cafData: Data, servePercent: Int) {
+        self.cafData = cafData
+        self.serveUpTo = (cafData.count * servePercent) / 100
+        super.init()
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
+    ) -> Bool {
+        requestCount += 1
+
+        // Content information request
+        if let contentRequest = loadingRequest.contentInformationRequest {
+            contentInfoRequested = true
+            contentRequest.contentType = "public.audio"
+            contentRequest.contentLength = Int64(cafData.count)
+            contentRequest.isByteRangeAccessSupported = true
+            log("  [Loader] Content info requested, reporting \(cafData.count) bytes")
+        }
+
+        // Data request
+        if let dataRequest = loadingRequest.dataRequest {
+            let offset = Int(dataRequest.requestedOffset)
+            let requested = dataRequest.requestedLength
+
+            if firstDataRequestSize == 0 {
+                firstDataRequestSize = requested
+            }
+
+            // Limit how much we serve to simulate progressive delivery
+            let available = min(serveUpTo, cafData.count)
+            let canServe = max(0, available - offset)
+
+            if canServe <= 0 {
+                // Don't finish loading yet - data not available
+                log("  [Loader] Request #\(requestCount): offset=\(offset) requested=\(requested) -> WAITING (not yet available)")
+                return true // we'll handle it later (but won't in this test)
+            }
+
+            let serveLength = min(requested, canServe)
+            let range = offset..<(offset + serveLength)
+            dataRequest.respond(with: cafData.subdata(in: range))
+            bytesServed += serveLength
+
+            log("  [Loader] Request #\(requestCount): offset=\(offset) requested=\(requested) served=\(serveLength)")
+
+            loadingRequest.finishLoading()
+        } else {
+            loadingRequest.finishLoading()
+        }
+
+        return true
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel loadingRequest: AVAssetResourceLoadingRequest
+    ) {
+        log("  [Loader] Request cancelled")
+    }
+}
+
+func testProgressivePlayback(cafData: Data) {
+    // Test with different percentages of data available
+    let percentages = [10, 25, 50, 100]
+
+    for percent in percentages {
+        log("")
+        log("  --- Serving \(percent)% of CAF data (\(cafData.count * percent / 100) of \(cafData.count) bytes) ---")
+
+        let loader = ProgressiveLoader(cafData: cafData, servePercent: percent)
+        let loaderQueue = DispatchQueue(label: "progressive-loader-\(percent)")
+
+        // Custom URL scheme so AVPlayer delegates to our loader
+        let customUrl = URL(string: "opus-remux-test://track/audio-\(percent).caf")!
+        let asset = AVURLAsset(url: customUrl)
+        asset.resourceLoader.setDelegate(loader, queue: loaderQueue)
+
+        let playerItem = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: playerItem)
+
+        // Observe playerItem status
+        let semaphore = DispatchSemaphore(value: 0)
+        var observedStatus = ""
+
+        let observer = playerItem.observe(\.status, options: [.new]) { item, _ in
+            switch item.status {
+            case .readyToPlay:
+                observedStatus = "readyToPlay"
+                semaphore.signal()
+            case .failed:
+                observedStatus = "failed: \(item.error?.localizedDescription ?? "unknown")"
+                semaphore.signal()
+            case .unknown:
+                observedStatus = "unknown"
+            @unknown default:
+                observedStatus = "unexpected"
+            }
+        }
+
+        // Try to play
+        player.play()
+
+        // Wait up to 5 seconds for status change
+        let result = semaphore.wait(timeout: .now() + 5)
+
+        if result == .timedOut {
+            observedStatus = "timeout (stayed unknown)"
+        }
+
+        // Check results
+        let duration = CMTimeGetSeconds(playerItem.duration)
+        let durationStr = duration.isFinite ? "\(String(format: "%.1f", duration))s" : "unknown"
+
+        log("  Requests: \(loader.requestCount)")
+        log("  Bytes served: \(loader.bytesServed)")
+        log("  Content info requested: \(loader.contentInfoRequested)")
+        log("  Player status: \(observedStatus)")
+        log("  Duration reported: \(durationStr)")
+
+        if observedStatus == "readyToPlay" {
+            logPass("Progressive \(percent)%: AVPlayer ready to play!")
+
+            // Check buffered time
+            if let range = playerItem.loadedTimeRanges.first?.timeRangeValue {
+                let buffered = CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)
+                log("  Buffered: \(String(format: "%.1f", buffered))s")
+            }
+        } else {
+            logError("Progressive \(percent)%: \(observedStatus)")
+        }
+
+        // Cleanup
+        observer.invalidate()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+    }
+}
+
 main()
-RunLoop.current.run(until: Date(timeIntervalSinceNow: 2))
+RunLoop.current.run(until: Date(timeIntervalSinceNow: 30))
