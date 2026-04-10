@@ -27,17 +27,9 @@ jobs:
 
       - name: Build & Test
         run: |
-          SIMULATOR=$(xcrun simctl list devices available | grep "iPhone" | grep -v "unavailable" | tail -1 | sed 's/.*(\(.*\)).*/\1/')
-          echo "Using simulator: $SIMULATOR"
           xcodebuild test \
             -project SimulatorTest/SimulatorTest.xcodeproj \
             -scheme ResourceLoaderTests \
-            -destination "platform=iOS Simulator,id=$SIMULATOR" \
+            -destination "platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5" \
             -only-testing:ResourceLoaderTests \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || xcodebuild test \
-              -project SimulatorTest/SimulatorTest.xcodeproj \
-              -scheme ResourceLoaderTests \
-              -destination "platform=iOS Simulator,id=$SIMULATOR" \
-              -only-testing:ResourceLoaderTests \
-              CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO
