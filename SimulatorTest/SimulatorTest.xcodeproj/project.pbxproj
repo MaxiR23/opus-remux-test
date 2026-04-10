@@ -1,0 +1,172 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A101 /* ResourceLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A001 /* ResourceLoaderTests.swift */; };
+		A102 /* CAFMuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A002 /* CAFMuxer.swift */; };
+		A103 /* WebMDemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A003 /* WebMDemuxer.swift */; };
+		A105 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A005 /* AVFoundation.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A001 /* ResourceLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceLoaderTests.swift; sourceTree = "<group>"; };
+		A002 /* CAFMuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CAFMuxer.swift; sourceTree = "<group>"; };
+		A003 /* WebMDemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebMDemuxer.swift; sourceTree = "<group>"; };
+		A005 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A020 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A105 /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A030 /* / */ = {
+			isa = PBXGroup;
+			children = (
+				A031 /* SimulatorTest */,
+				A032 /* Sources */,
+				A033 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		A031 /* SimulatorTest */ = {
+			isa = PBXGroup;
+			children = (
+				A001 /* ResourceLoaderTests.swift */,
+			);
+			path = SimulatorTest;
+			sourceTree = "<group>";
+		};
+		A032 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A002 /* CAFMuxer.swift */,
+				A003 /* WebMDemuxer.swift */,
+			);
+			path = "../Sources/OpusRemuxTest";
+			sourceTree = "<group>";
+		};
+		A033 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A005 /* AVFoundation.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A040 /* ResourceLoaderTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A060;
+			buildPhases = (
+				A050 /* Sources */,
+				A020 /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = ResourceLoaderTests;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A070 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = A080;
+			compatibilityVersion = "Xcode 14.0";
+			mainGroup = A030;
+			targets = (
+				A040 /* ResourceLoaderTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A050 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A101 /* ResourceLoaderTests.swift in Sources */,
+				A102 /* CAFMuxer.swift in Sources */,
+				A103 /* WebMDemuxer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A090 /* Debug - Project */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphonesimulator;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A091 /* Debug - Target */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "";
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.test.ResourceLoaderTests;
+				PRODUCT_NAME = ResourceLoaderTests;
+				SDKROOT = iphonesimulator;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SWIFT_VERSION = 5.9;
+				TEST_HOST = "";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A060 /* Build configuration list for PBXNativeTarget */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A091 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A080 /* Build configuration list for PBXProject */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A090 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = A070 /* Project object */;
+}
