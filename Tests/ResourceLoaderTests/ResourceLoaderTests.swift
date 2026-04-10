@@ -171,7 +171,10 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
                    repeating: .milliseconds(intervalMs))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            guard self.bytesAvailable < self.cafData.count else { self.feedTimer?.cancel(); return }
+            guard self.bytesAvailable < self.cafData.count else { 
+                self.feedTimer?.cancel()
+                return 
+            }
             self.bytesAvailable = min(self.bytesAvailable + chunkBytes, self.cafData.count)
             self.processRequests()
         }
@@ -179,13 +182,17 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         feedTimer = t
     }
 
+    // MARK: - Delegate (cambio clave aquí)
+
     func resourceLoader(
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest
     ) -> Bool {
-        queue.async { [weak self] in
-            self?.pendingRequests.append(request)
-            self?.processRequests()
+        // ←←← SYNC en vez de async → elimina race con loadValuesAsynchronously
+        queue.sync { [weak self] in
+            guard let self else { return }
+            self.pendingRequests.append(request)
+            self.processRequests()
         }
         return true
     }
@@ -194,11 +201,12 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         _ resourceLoader: AVAssetResourceLoader,
         didCancel request: AVAssetResourceLoadingRequest
     ) {
-        queue.async { [weak self] in
+        queue.sync { [weak self] in
             self?.pendingRequests.removeAll { $0 === request }
         }
     }
 
+    // (processRequests se deja exactamente igual)
     private func processRequests() {
         var finished: [AVAssetResourceLoadingRequest] = []
 
