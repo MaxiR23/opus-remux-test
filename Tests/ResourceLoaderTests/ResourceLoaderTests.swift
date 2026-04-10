@@ -52,21 +52,41 @@ class ResourceLoaderTests: XCTestCase {
         let loader = CAFProgressiveLoader(cafData: cafData, startPercent: start)
         asset.resourceLoader.setDelegate(loader, queue: loader.queue)
 
+        let playerItem = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: playerItem)
+
         let exp = expectation(description: "progressive-\(label)")
 
-        asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
-            var err: NSError?
-            let status = asset.statusOfValue(forKey: "playable", error: &err)
-            XCTAssertEqual(status, .loaded, "\(label) status: \(err?.localizedDescription ?? "?")")
-            XCTAssertTrue(asset.isPlayable, "\(label) not playable")
-            XCTAssertGreaterThan(asset.tracks.count, 0, "\(label) no tracks")
-            let dur = CMTimeGetSeconds(asset.duration)
-            XCTAssertGreaterThan(dur, 0, "\(label) duration=0")
-            print("[TEST] \(label): playable=true duration=\(String(format: "%.1f", dur))s bytesServed=\(loader.bytesServed)")
-            exp.fulfill()
+        let observer = playerItem.observe(\.status, options: [.new]) { item, _ in
+            switch item.status {
+            case .readyToPlay:
+                let dur = CMTimeGetSeconds(item.duration)
+                let durStr = dur.isFinite ? String(format: "%.1f", dur) : "unknown"
+                print("[TEST] \(label): readyToPlay duration=\(durStr)s bytesServed=\(loader.bytesServed)")
+                exp.fulfill()
+            case .failed:
+                let err = item.error?.localizedDescription ?? "unknown"
+                print("[TEST] \(label): FAILED error=\(err)")
+                XCTFail("\(label) failed: \(err)")
+                exp.fulfill()
+            case .unknown:
+                break
+            @unknown default:
+                break
+            }
         }
 
+        player.play()
+
         wait(for: [exp], timeout: 20)
+
+        let dur = CMTimeGetSeconds(playerItem.duration)
+        XCTAssertEqual(playerItem.status, .readyToPlay, "\(label) not readyToPlay")
+        XCTAssertTrue(dur.isFinite && dur > 0, "\(label) duration=\(dur)")
+
+        observer.invalidate()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
         _ = loader
     }
 
