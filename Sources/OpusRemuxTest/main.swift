@@ -1,14 +1,27 @@
-// MARK: - Progressive ResourceLoader test (FIXED STREAMING BEHAVIOR)
+import Foundation
+import AVFoundation
+
+// MARK: - Logger
+
+func log(_ msg: String) {
+    print("[TEST] \(msg)")
+}
+
+func logError(_ msg: String) {
+    print("[FAIL] \(msg)")
+}
+
+func logPass(_ msg: String) {
+    print("[PASS] \(msg)")
+}
+
+// MARK: - Progressive Loader
 
 class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
+
     let cafData: Data
     let serveUpTo: Int
-    var requestCount = 0
-    var bytesServed = 0
-    var firstDataRequestSize = 0
-    var contentInfoRequested = false
 
-    // keep pending requests alive (do NOT finish them prematurely)
     private var pendingRequests: [AVAssetResourceLoadingRequest] = []
     private let lock = NSLock()
 
@@ -22,83 +35,13 @@ class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
+
         lock.lock()
-        defer { lock.unlock() }
-
-        requestCount += 1
-
-        // Content info
-        if let contentRequest = loadingRequest.contentInformationRequest {
-            contentInfoRequested = true
-            contentRequest.contentType = "com.apple.coreaudio-format"
-            contentRequest.contentLength = Int64(cafData.count)
-            contentRequest.isByteRangeAccessSupported = true
-            log("  [Loader] Content info requested, reporting \(cafData.count) bytes")
-        }
-
-        // Track request for incremental serving
         pendingRequests.append(loadingRequest)
+        lock.unlock()
 
-        processPendingRequests()
-
+        processRequests()
         return true
-    }
-
-    private func processPendingRequests() {
-        let available = min(serveUpTo, cafData.count)
-
-        var completed: [AVAssetResourceLoadingRequest] = []
-
-        for request in pendingRequests {
-            guard let dataRequest = request.dataRequest else {
-                request.finishLoading()
-                completed.append(request)
-                continue
-            }
-
-            let offset = Int(dataRequest.requestedOffset)
-            let requested = dataRequest.requestedLength
-
-            if firstDataRequestSize == 0 {
-                firstDataRequestSize = requested
-            }
-
-            // nothing available yet for this offset
-            if offset >= available {
-                log("  [Loader] Request offset=\(offset) waiting (available=\(available))")
-                continue
-            }
-
-            let unreadAvailable = available - offset
-            let alreadyResponded = dataRequest.currentOffset - Int64(offset)
-            let remainingToSend = unreadAvailable - Int(alreadyResponded)
-
-            if remainingToSend <= 0 {
-                continue
-            }
-
-            let chunkSize = min(remainingToSend, requested)
-            let start = offset + Int(alreadyResponded)
-            let end = start + chunkSize
-
-            let chunk = cafData.subdata(in: start..<end)
-            dataRequest.respond(with: chunk)
-            bytesServed += chunk.count
-
-            log("  [Loader] offset=\(offset) requested=\(requested) served=\(chunk.count)")
-
-            // ONLY finish if we fully satisfied requested length
-            let totalServed = Int(dataRequest.currentOffset - Int64(offset))
-            if totalServed >= requested {
-                request.finishLoading()
-                completed.append(request)
-            }
-        }
-
-        // remove completed requests
-        pendingRequests.removeAll { req in
-            completed.contains(where: { $0 === req })
-        }
     }
 
     func resourceLoader(
@@ -106,9 +49,108 @@ class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         didCancel loadingRequest: AVAssetResourceLoadingRequest
     ) {
         lock.lock()
-        defer { lock.unlock() }
-
         pendingRequests.removeAll { $0 === loadingRequest }
-        log("  [Loader] Request cancelled")
+        lock.unlock()
+    }
+
+    private func processRequests() {
+        lock.lock()
+
+        var completed: [AVAssetResourceLoadingRequest] = []
+
+        for request in pendingRequests {
+
+            if let content = request.contentInformationRequest {
+                content.contentType = "com.apple.coreaudio-format"
+                content.contentLength = Int64(cafData.count)
+                content.isByteRangeAccessSupported = true
+            }
+
+            guard let dataRequest = request.dataRequest else {
+                completed.append(request)
+                continue
+            }
+
+            let offset = Int(dataRequest.requestedOffset)
+            let requested = dataRequest.requestedLength
+
+            let available = min(serveUpTo, cafData.count)
+            let remaining = available - offset
+
+            guard remaining > 0 else {
+                continue
+            }
+
+            let length = min(requested, remaining)
+            let range = offset..<(offset + length)
+
+            dataRequest.respond(with: cafData.subdata(in: range))
+
+            let end = offset + length
+            let requestEnd = Int(dataRequest.requestedOffset + Int64(dataRequest.requestedLength))
+
+            if end >= requestEnd {
+                completed.append(request)
+            }
+        }
+
+        pendingRequests.removeAll { req in
+            if completed.contains(where: { $0 === req }) {
+                req.finishLoading()
+                return true
+            }
+            return false
+        }
+
+        lock.unlock()
     }
 }
+
+// MARK: - Simple Progressive Test
+
+func testProgressive(cafData: Data, percent: Int) {
+    log("")
+    log("--- Progressive Test \(percent)% ---")
+
+    let url = URL(string: "progressive://test.caf")!
+    let asset = AVURLAsset(url: url)
+
+    let loader = ProgressiveLoader(cafData: cafData, servePercent: percent)
+    asset.resourceLoader.setDelegate(loader, queue: DispatchQueue(label: "loader"))
+
+    let semaphore = DispatchSemaphore(value: 0)
+
+    asset.loadValuesAsynchronously(forKeys: ["playable"]) {
+        var error: NSError?
+
+        let status = asset.statusOfValue(forKey: "playable", error: &error)
+
+        if status == .loaded && asset.isPlayable {
+            logPass("Progressive \(percent)% playable")
+        } else {
+            logError("Progressive \(percent)% failed: \(error?.localizedDescription ?? "status \(status.rawValue)")")
+        }
+
+        semaphore.signal()
+    }
+
+    _ = semaphore.wait(timeout: .now() + 5)
+}
+
+// MARK: - Main Test (SIMPLIFICADO)
+
+func main() {
+    log("=== Progressive CAF Test ===")
+
+    // Generamos CAF fake simple (reemplazá por tu mux real)
+    let cafData = Data(repeating: 0xAA, count: 100_000)
+
+    testProgressive(cafData: cafData, percent: 100)
+    testProgressive(cafData: cafData, percent: 50)
+    testProgressive(cafData: cafData, percent: 10)
+
+    log("=== Done ===")
+}
+
+main()
+RunLoop.current.run(until: Date(timeIntervalSinceNow: 2))
