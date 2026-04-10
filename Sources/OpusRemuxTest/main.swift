@@ -244,6 +244,157 @@ func generateCAF(webmURL: String?) -> Data? {
     return caf
 }
 
+// MARK: - OGG Loader
+
+class OGGProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
+
+    let oggData: Data
+    private(set) var bytesAvailable: Int
+    let queue = DispatchQueue(label: "ogg.progressive.loader")
+    var delegateCallCount = 0
+
+    private var pendingRequests: [AVAssetResourceLoadingRequest] = []
+    private var feedTimer: DispatchSourceTimer?
+
+    init(oggData: Data, startPercent: Int, chunkPercent: Int = 5, intervalMs: Int = 80) {
+        self.oggData = oggData
+        self.bytesAvailable = oggData.count * startPercent / 100
+        super.init()
+        startFeed(chunkBytes: max(1, oggData.count * chunkPercent / 100), intervalMs: intervalMs)
+    }
+
+    private func startFeed(chunkBytes: Int, intervalMs: Int) {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .milliseconds(intervalMs),
+                   repeating: .milliseconds(intervalMs))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.bytesAvailable < self.oggData.count else {
+                self.feedTimer?.cancel(); return
+            }
+            self.bytesAvailable = min(self.bytesAvailable + chunkBytes, self.oggData.count)
+            log("  feed: \(self.bytesAvailable)/\(self.oggData.count) (\(self.bytesAvailable * 100 / self.oggData.count)%)")
+            self.processRequests()
+        }
+        t.resume()
+        feedTimer = t
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
+        delegateCallCount += 1
+        let hasInfo = request.contentInformationRequest != nil
+        let hasData = request.dataRequest != nil
+        let range   = request.dataRequest.map { "\($0.requestedOffset)..\($0.requestedOffset + Int64($0.requestedLength))" } ?? "n/a"
+        log("  [ogg-loader] #\(delegateCallCount) shouldWait info=\(hasInfo) data=\(hasData) range=\(range)")
+        queue.async { [weak self] in
+            self?.pendingRequests.append(request)
+            self?.processRequests()
+        }
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel request: AVAssetResourceLoadingRequest) {
+        log("  [ogg-loader] didCancel")
+        queue.async { [weak self] in
+            self?.pendingRequests.removeAll { $0 === request }
+        }
+    }
+
+    func processRequests() {
+        var finished: [AVAssetResourceLoadingRequest] = []
+
+        for request in pendingRequests {
+
+            if let info = request.contentInformationRequest {
+                info.contentType                = "public.ogg-vorbis"
+                info.contentLength              = Int64(oggData.count)
+                info.isByteRangeAccessSupported = true
+                log("  [ogg-loader] filled contentInfo len=\(oggData.count)")
+
+                if request.dataRequest == nil {
+                    request.finishLoading()
+                    finished.append(request)
+                    continue
+                }
+            }
+
+            guard let dr = request.dataRequest else {
+                request.finishLoading()
+                finished.append(request)
+                continue
+            }
+
+            let requestedEnd    = Int(dr.requestedOffset) + dr.requestedLength
+            let currentPosition = Int(dr.currentOffset)
+
+            guard bytesAvailable > currentPosition else { continue }
+
+            let end   = min(bytesAvailable, requestedEnd)
+            let chunk = oggData.subdata(in: currentPosition..<end)
+            dr.respond(with: chunk)
+            log("  [ogg-loader] responded \(chunk.count) bytes [\(currentPosition)..\(end)]")
+
+            if Int(dr.currentOffset) >= requestedEnd {
+                log("  [ogg-loader] request satisfied, finishing")
+                request.finishLoading()
+                finished.append(request)
+            }
+        }
+
+        pendingRequests.removeAll { r in finished.contains { $0 === r } }
+    }
+}
+
+func testProgressiveOGG(oggData: Data, startPercent: Int, label: String) {
+    log("--- OGG \(label): start=\(startPercent)% ---")
+
+    let url   = URL(string: "xogg://\(label)")!
+    let asset = AVURLAsset(url: url)
+
+    let loader = OGGProgressiveLoader(oggData: oggData, startPercent: startPercent)
+    asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+
+    let sem = DispatchSemaphore(value: 0)
+
+    asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
+        var err: NSError?
+        let status = asset.statusOfValue(forKey: "playable", error: &err)
+
+        log("  [result] delegate called \(loader.delegateCallCount) time(s)")
+
+        if status == .loaded {
+            let dur = CMTimeGetSeconds(asset.duration)
+            if asset.isPlayable && asset.tracks.count > 0 {
+                logPass("OGG \(label) playable=\(asset.isPlayable) duration=\(String(format: "%.2f", dur))s tracks=\(asset.tracks.count)")
+            } else {
+                logError("OGG \(label) loaded but NOT playable playable=\(asset.isPlayable) duration=\(String(format: "%.2f", dur))s tracks=\(asset.tracks.count)")
+            }
+        } else {
+            logError("OGG \(label) FAILED: \(err?.localizedDescription ?? "status \(status.rawValue)")")
+        }
+        sem.signal()
+    }
+
+    _ = sem.wait(timeout: .now() + 15)
+    _ = loader
+    log("")
+}
+
+func generateOGG(demux: DemuxResult) -> Data? {
+    let ogg = measure("Mux OGG") {
+        OGGMuxer.mux(opusHead: demux.opusHead, packets: demux.packets, channels: demux.channels)
+    }
+    guard ogg.prefix(4) == "OggS".data(using: .ascii) else { logError("OGG invalido"); return nil }
+    logPass("OGG muxeado: \(ogg.count) bytes")
+    try? ogg.write(to: URL(fileURLWithPath: "/tmp/remux_test_output.ogg"))
+    logPass("Guardado en /tmp/remux_test_output.ogg")
+    return ogg
+}
+
+// MARK: - Main
+
 func main() {
     log("=== Opus Remux + Progressive Streaming Test ===\n")
 
@@ -260,11 +411,31 @@ func main() {
     log("=== Fase 2b: AVFoundation directo (file://) ===")
     testDirect(path: "/tmp/remux_test_output.caf")
 
-    log("=== Fase 3: Progressive Streaming ===")
+    log("=== Fase 3: Progressive Streaming CAF ===")
     testProgressive(cafData: cafData, startPercent: 100, label: "100pct")
     testProgressive(cafData: cafData, startPercent: 50,  label: "50pct")
     testProgressive(cafData: cafData, startPercent: 10,  label: "10pct")
     testProgressive(cafData: cafData, startPercent: 0,   label: "0pct")
+
+    log("=== Fase 4: WebM -> OGG ===")
+    let tmpWebM = "/tmp/test_opus.webm"
+    guard let raw = try? Data(contentsOf: URL(fileURLWithPath: tmpWebM)),
+          let demux = try? WebMDemuxer(data: raw).demux(),
+          let oggData = generateOGG(demux: demux) else {
+        logError("No se pudo generar el OGG"); exit(1)
+    }
+
+    log("=== Fase 4b: afinfo OGG ===")
+    runAfinfo(path: "/tmp/remux_test_output.ogg")
+
+    log("=== Fase 4c: AVFoundation directo OGG (file://) ===")
+    testDirect(path: "/tmp/remux_test_output.ogg")
+
+    log("=== Fase 5: Progressive Streaming OGG ===")
+    testProgressiveOGG(oggData: oggData, startPercent: 100, label: "100pct")
+    testProgressiveOGG(oggData: oggData, startPercent: 50,  label: "50pct")
+    testProgressiveOGG(oggData: oggData, startPercent: 10,  label: "10pct")
+    testProgressiveOGG(oggData: oggData, startPercent: 0,   label: "0pct")
 
     log("=== Todo listo ===")
 }
