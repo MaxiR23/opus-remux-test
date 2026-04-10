@@ -1,6 +1,6 @@
 import Foundation
 
-enum RemuxError: LocalizedError {
+public enum RemuxError: LocalizedError {
     case invalidEBML(String)
     case noOpusTrack
     case unexpectedEnd
@@ -9,7 +9,7 @@ enum RemuxError: LocalizedError {
     case invalidRange
     case notPrepared
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidEBML(let detail):
             return "Invalid EBML: \(detail)"

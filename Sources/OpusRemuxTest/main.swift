@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import OpusRemuxLib
 
 func log(_ msg: String)      { print("[TEST] \(msg)") }
 func logError(_ msg: String) { print("[FAIL] \(msg)") }

@@ -1,7 +1,7 @@
 import Foundation
 
 // MARK: - EBML Element IDs (Matroska/WebM subset)
-enum EBMLElementID: UInt32 {
+public enum EBMLElementID: UInt32 {
     case ebmlHeader       = 0x1A45DFA3
     case segment          = 0x18538067
     case tracks           = 0x1654AE6B
@@ -19,30 +19,30 @@ enum EBMLElementID: UInt32 {
 }
 
 // MARK: - Parsed output
-struct OpusPacket {
-    let data: Data
-    let timestampMs: Int64
-    let isKeyframe: Bool
+public struct OpusPacket {
+    public let data: Data
+    public let timestampMs: Int64
+    public let isKeyframe: Bool
 }
 
-struct DemuxResult {
-    let opusHead: Data
-    let packets: [OpusPacket]
-    let channels: UInt8
-    let sampleRate: UInt32
+public struct DemuxResult {
+    public let opusHead: Data
+    public let packets: [OpusPacket]
+    public let channels: UInt8
+    public let sampleRate: UInt32
 }
 
 // MARK: - WebMDemuxer
-class WebMDemuxer {
+public class WebMDemuxer {
 
     private var buffer: Data
     private var offset: Int = 0
 
-    init(data: Data) {
+    public init(data: Data) {
         self.buffer = data
     }
 
-    func demux() throws -> DemuxResult {
+    public func demux() throws -> DemuxResult {
         offset = 0
 
         let ebmlHeader = try readElement()

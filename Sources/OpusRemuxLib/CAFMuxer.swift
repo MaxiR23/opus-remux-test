@@ -1,8 +1,8 @@
 import Foundation
 
-class CAFMuxer {
+public class CAFMuxer {
 
-    static func mux(opusHead: Data, packets: [OpusPacket], channels: UInt8) -> Data {
+    public static func mux(opusHead: Data, packets: [OpusPacket], channels: UInt8) -> Data {
         var out = Data()
 
         // -- 1. File Header --

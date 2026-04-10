@@ -1,8 +1,8 @@
 import Foundation
 
-struct OGGMuxer {
+public struct OGGMuxer {
 
-    static func mux(opusHead: Data, packets: [OpusPacket], channels: UInt8) -> Data {
+    public static func mux(opusHead: Data, packets: [OpusPacket], channels: UInt8) -> Data {
         var out = Data()
         var seq: UInt32 = 0
         let serial: UInt32 = 0x4F505553

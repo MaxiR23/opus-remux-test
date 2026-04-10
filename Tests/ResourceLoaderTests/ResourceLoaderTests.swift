@@ -1,12 +1,6 @@
 import XCTest
 import AVFoundation
-
-// RemuxError needed by WebMDemuxer
-enum RemuxError: Error {
-    case invalidEBML(String)
-    case noOpusTrack
-    case unexpectedEnd
-}
+import OpusRemuxLib
 
 class ResourceLoaderTests: XCTestCase {
 
@@ -16,14 +10,17 @@ class ResourceLoaderTests: XCTestCase {
         super.setUp()
         cafData = buildCAF()
         XCTAssertNotNil(cafData, "CAF generation failed")
+        XCTAssertTrue(cafData.prefix(4) == "caff".data(using: .ascii), "Invalid CAF magic")
     }
+
+    // MARK: - Direct file playback
 
     func testCAFDirectFileURL() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test.caf")
         try cafData.write(to: tmp)
 
         let asset = AVURLAsset(url: tmp)
-        let exp = expectation(description: "load")
+        let exp = expectation(description: "direct-load")
 
         asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
             var err: NSError?
@@ -31,35 +28,31 @@ class ResourceLoaderTests: XCTestCase {
             XCTAssertEqual(status, .loaded, "status: \(err?.localizedDescription ?? "?")")
             XCTAssertTrue(asset.isPlayable, "not playable via file://")
             XCTAssertGreaterThan(asset.tracks.count, 0, "no tracks")
+            let dur = CMTimeGetSeconds(asset.duration)
+            print("[TEST] Direct: playable=true duration=\(String(format: "%.1f", dur))s")
             exp.fulfill()
         }
 
         wait(for: [exp], timeout: 10)
     }
 
-    func testCAFProgressiveLoader100pct() {
-        runProgressiveTest(startPercent: 100, label: "100pct")
-    }
+    // MARK: - Progressive loader tests
 
-    func testCAFProgressiveLoader50pct() {
-        runProgressiveTest(startPercent: 50, label: "50pct")
-    }
+    func testProgressive100pct() { runProgressive(start: 100, label: "100pct") }
+    func testProgressive50pct()  { runProgressive(start: 50,  label: "50pct")  }
+    func testProgressive25pct()  { runProgressive(start: 25,  label: "25pct")  }
+    func testProgressive10pct()  { runProgressive(start: 10,  label: "10pct")  }
+    func testProgressive0pct()   { runProgressive(start: 0,   label: "0pct")   }
 
-    func testCAFProgressiveLoader10pct() {
-        runProgressiveTest(startPercent: 10, label: "10pct")
-    }
+    // MARK: - Progressive test runner
 
-    func testCAFProgressiveLoader0pct() {
-        runProgressiveTest(startPercent: 0, label: "0pct")
-    }
-
-    private func runProgressiveTest(startPercent: Int, label: String) {
+    private func runProgressive(start: Int, label: String) {
         let url = URL(string: "xcaf://\(label)")!
         let asset = AVURLAsset(url: url)
-        let loader = CAFProgressiveLoader(cafData: cafData, startPercent: startPercent)
+        let loader = CAFProgressiveLoader(cafData: cafData, startPercent: start)
         asset.resourceLoader.setDelegate(loader, queue: loader.queue)
 
-        let exp = expectation(description: "load-\(label)")
+        let exp = expectation(description: "progressive-\(label)")
 
         asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
             var err: NSError?
@@ -69,6 +62,7 @@ class ResourceLoaderTests: XCTestCase {
             XCTAssertGreaterThan(asset.tracks.count, 0, "\(label) no tracks")
             let dur = CMTimeGetSeconds(asset.duration)
             XCTAssertGreaterThan(dur, 0, "\(label) duration=0")
+            print("[TEST] \(label): playable=true duration=\(String(format: "%.1f", dur))s bytesServed=\(loader.bytesServed)")
             exp.fulfill()
         }
 
@@ -76,37 +70,66 @@ class ResourceLoaderTests: XCTestCase {
         _ = loader
     }
 
+    // MARK: - Build CAF test data
+
     private func buildCAF() -> Data? {
-        let sine = generateSineWebM()
-        guard let raw = sine, !raw.isEmpty else { return nil }
-        guard let demux = try? WebMDemuxer(data: raw).demux() else { return nil }
+        // Try ffmpeg first (works on macOS)
+        #if os(macOS)
+        if let webm = generateWithFFmpeg() {
+            return remuxWebMToCAF(webm)
+        }
+        #endif
+
+        // Fallback: read pre-generated CAF from TestData.swift (for iOS Simulator)
+        if let data = EmbeddedTestData.cafData {
+            print("[TEST] Using embedded CAF data: \(data.count) bytes")
+            return data
+        }
+
+        XCTFail("No test data available")
+        return nil
+    }
+
+    private func remuxWebMToCAF(_ webm: Data) -> Data? {
+        guard let demux = try? WebMDemuxer(data: webm).demux() else { return nil }
         let caf = CAFMuxer.mux(opusHead: demux.opusHead, packets: demux.packets, channels: demux.channels)
-        guard caf.prefix(4) == "caff".data(using: .ascii) else { return nil }
+        print("[TEST] Built CAF: \(caf.count) bytes, \(demux.packets.count) packets, \(demux.channels)ch")
         return caf
     }
 
-    private func generateSineWebM() -> Data? {
-        // 1kHz sine, 2s, Opus, WebM — generated inline via AudioToolbox PCM→Opus is complex,
-        // so we embed a minimal valid WebM/Opus file as base64.
-        // This is a 2-second 1ch 48kHz Opus sine tone generated offline.
-        // If ffmpeg is available on the simulator runtime we use it, otherwise fallback to embedded.
+    #if os(macOS)
+    private func generateWithFFmpeg() -> Data? {
         let tmp = NSTemporaryDirectory() + "sine.webm"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = ["ffmpeg", "-y",
-                       "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-                       "-c:a", "libopus", "-b:a", "64k",
+                       "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                       "-ac", "2",
+                       "-c:a", "libopus", "-b:a", "160k",
+                       "-vbr", "on", "-frame_duration", "20",
                        "-f", "webm", tmp]
         p.standardOutput = FileHandle.nullDevice
         p.standardError  = FileHandle.nullDevice
-        if (try? p.run()) != nil {
-            p.waitUntilExit()
-            if p.terminationStatus == 0 {
-                return try? Data(contentsOf: URL(fileURLWithPath: tmp))
-            }
-        }
-        return nil
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        return try? Data(contentsOf: URL(fileURLWithPath: tmp))
     }
+    #endif
+}
+
+// MARK: - Embedded test data (generated by workflow for iOS Simulator)
+// This struct is overridden by TestData.swift when running on iOS Simulator.
+// On macOS, ffmpeg generates fresh data so this is just a fallback.
+
+enum EmbeddedTestData {
+    static var cafData: Data? {
+        guard let b64 = _base64, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
+    }
+
+    // Replaced at build time by the workflow. Empty = use ffmpeg.
+    static let _base64: String? = nil
 }
 
 // MARK: - CAFProgressiveLoader
@@ -115,7 +138,8 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     let cafData: Data
     private(set) var bytesAvailable: Int
-    let queue = DispatchQueue(label: "sim.caf.loader")
+    private(set) var bytesServed: Int = 0
+    let queue = DispatchQueue(label: "caf.progressive.loader")
 
     private var pendingRequests: [AVAssetResourceLoadingRequest] = []
     private var feedTimer: DispatchSourceTimer?
@@ -141,8 +165,10 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         feedTimer = t
     }
 
-    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
-                        shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest
+    ) -> Bool {
         queue.async { [weak self] in
             self?.pendingRequests.append(request)
             self?.processRequests()
@@ -150,14 +176,16 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         return true
     }
 
-    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
-                        didCancel request: AVAssetResourceLoadingRequest) {
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel request: AVAssetResourceLoadingRequest
+    ) {
         queue.async { [weak self] in
             self?.pendingRequests.removeAll { $0 === request }
         }
     }
 
-    func processRequests() {
+    private func processRequests() {
         var finished: [AVAssetResourceLoadingRequest] = []
 
         for request in pendingRequests {
@@ -186,6 +214,7 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
             let end   = min(bytesAvailable, requestedEnd)
             let chunk = cafData.subdata(in: currentPosition..<end)
             dr.respond(with: chunk)
+            bytesServed += chunk.count
 
             if Int(dr.currentOffset) >= requestedEnd {
                 request.finishLoading()
