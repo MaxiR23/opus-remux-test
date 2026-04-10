@@ -171,9 +171,9 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
                    repeating: .milliseconds(intervalMs))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            guard self.bytesAvailable < self.cafData.count else { 
+            guard self.bytesAvailable < self.cafData.count else {
                 self.feedTimer?.cancel()
-                return 
+                return
             }
             self.bytesAvailable = min(self.bytesAvailable + chunkBytes, self.cafData.count)
             self.processRequests()
@@ -182,14 +182,22 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         feedTimer = t
     }
 
-    // MARK: - Delegate (cambio clave aquí)
+    // MARK: - Delegate (FIX CLAVE AQUÍ)
 
     func resourceLoader(
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest
     ) -> Bool {
-        // ←←← SYNC en vez de async → elimina race con loadValuesAsynchronously
-        queue.sync { [weak self] in
+
+        // ←←← Rellenamos el header SÍNCRONAMENTE (antes de que loadValuesAsynchronously termine)
+        if let info = request.contentInformationRequest {
+            info.contentType                = AVFileType.caf.rawValue
+            info.contentLength              = Int64(cafData.count)
+            info.isByteRangeAccessSupported = true
+        }
+
+        // Ahora sí mandamos el resto al queue (dataRequest + proceso)
+        queue.async { [weak self] in
             guard let self else { return }
             self.pendingRequests.append(request)
             self.processRequests()
@@ -201,27 +209,16 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
         _ resourceLoader: AVAssetResourceLoader,
         didCancel request: AVAssetResourceLoadingRequest
     ) {
-        queue.sync { [weak self] in
+        queue.async { [weak self] in
             self?.pendingRequests.removeAll { $0 === request }
         }
     }
 
-    // (processRequests se deja exactamente igual)
     private func processRequests() {
         var finished: [AVAssetResourceLoadingRequest] = []
 
         for request in pendingRequests {
-            if let info = request.contentInformationRequest {
-                info.contentType                = AVFileType.caf.rawValue
-                info.contentLength              = Int64(cafData.count)
-                info.isByteRangeAccessSupported = true
-                if request.dataRequest == nil {
-                    request.finishLoading()
-                    finished.append(request)
-                    continue
-                }
-            }
-
+            // content info ya se rellenó arriba, solo procesamos dataRequest
             guard let dr = request.dataRequest else {
                 request.finishLoading()
                 finished.append(request)
@@ -238,7 +235,7 @@ class CAFProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
             dr.respond(with: chunk)
             bytesServed += chunk.count
 
-            if Int(dr.currentOffset) >= requestedEnd {
+            if Int(dr.currentOffset) + chunk.count >= requestedEnd {
                 request.finishLoading()
                 finished.append(request)
             }
