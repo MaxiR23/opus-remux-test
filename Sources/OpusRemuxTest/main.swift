@@ -45,13 +45,40 @@ func runAfinfo(path: String) {
     else                         { logError("afinfo FAIL"); print(out) }
 }
 
+// MARK: - Direct file:// AVFoundation test
+// Si esto también da tracks=0, el problema es soporte de Opus en macOS CLI,
+// no nuestro resource loader.
+
+func testDirect(path: String) {
+    log("--- Direct file:// test ---")
+    let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+    let sem = DispatchSemaphore(value: 0)
+
+    asset.loadValuesAsynchronously(forKeys: ["playable", "duration", "tracks"]) {
+        var err: NSError?
+        let status = asset.statusOfValue(forKey: "playable", error: &err)
+        if status == .loaded {
+            let dur = CMTimeGetSeconds(asset.duration)
+            logPass("Direct → playable=\(asset.isPlayable)  duration=\(String(format: "%.2f", dur))s  tracks=\(asset.tracks.count)")
+            if asset.tracks.isEmpty {
+                logError("tracks=0 con file:// → AVFoundation no soporta Opus/CAF en este entorno")
+            }
+        } else {
+            logError("Direct → FAILED: \(err?.localizedDescription ?? "status \(status.rawValue)")")
+        }
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 10)
+    log("")
+}
+
 // MARK: - ProgressiveLoader
 
 class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     let cafData: Data
     private(set) var bytesAvailable: Int
-    let queue = DispatchQueue(label: "progressive.loader")   // internal: needed by setDelegate
+    let queue = DispatchQueue(label: "progressive.loader")
 
     private var pendingRequests: [AVAssetResourceLoadingRequest] = []
     private var feedTimer: DispatchSourceTimer?
@@ -82,29 +109,28 @@ class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     // MARK: Delegate
+    // Called on loader.queue — process synchronously, no async dispatch.
+    // AVFoundation gets content info + first bytes in the same runloop turn.
 
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
                         shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
-        queue.async { [weak self] in
-            self?.pendingRequests.append(request)
-            self?.processRequests()
-        }
+        pendingRequests.append(request)
+        processRequests()
         return true
     }
 
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
                         didCancel request: AVAssetResourceLoadingRequest) {
-        queue.async { [weak self] in
-            self?.pendingRequests.removeAll { $0 === request }
-        }
+        pendingRequests.removeAll { $0 === request }
     }
 
     // MARK: Pump
 
-    private func processRequests() {
+    func processRequests() {
         var finished: [AVAssetResourceLoadingRequest] = []
 
         for request in pendingRequests {
+
             if let info = request.contentInformationRequest {
                 info.contentType                = "com.apple.coreaudio-format"
                 info.contentLength              = Int64(cafData.count)
@@ -129,6 +155,7 @@ class ProgressiveLoader: NSObject, AVAssetResourceLoaderDelegate {
                 request.finishLoading()
                 finished.append(request)
             }
+            // else: leave pending, feed timer resumes it
         }
 
         pendingRequests.removeAll { r in finished.contains { $0 === r } }
@@ -232,7 +259,10 @@ func main() {
     log("\n=== Fase 2: afinfo ===")
     runAfinfo(path: "/tmp/remux_test_output.caf")
 
-    log("\n=== Fase 3: Progressive Streaming ===")
+    log("=== Fase 2b: AVFoundation directo (file://) ===")
+    testDirect(path: "/tmp/remux_test_output.caf")
+
+    log("=== Fase 3: Progressive Streaming ===")
     testProgressive(cafData: cafData, startPercent: 100, label: "100pct")
     testProgressive(cafData: cafData, startPercent: 50,  label: "50pct")
     testProgressive(cafData: cafData, startPercent: 10,  label: "10pct")
